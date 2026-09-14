@@ -15,9 +15,12 @@
 npm run dev          # 开发
 npm run build        # 类型检查 + 生产构建
 npm run check        # 仅类型检查
-npm run test:gb      # 纯逻辑测试（跨档/补位/幂等/超额退款/越级/取消一致性）
-node scripts/e2e.mjs # 浏览器 E2E（先 build，再 vite preview --port 5200）
+npm run test:gb      # 纯逻辑测试（跨档/补位/幂等/超额退款/越级/取消一致性 + 四个边界反例）
+node scripts/e2e.mjs       # 浏览器 E2E（先 build，再 vite preview --port 5200）
+node scripts/e2e-edge.mjs  # 浏览器边界反例（减量补位/全部发货才完成/改价超额拦截/并发校验）
 ```
+
+边界规则补充：减少数量释放名额会立即按候补顺序补位；批次必须全部正式订单发货后才能完成；已收款后下调阶梯价或运费导致净付超过应收时会被拦截；最后一席并发复用报名状态与输入校验（锁单/取消/完成后一律不能新增报名）。
 
 ---
 

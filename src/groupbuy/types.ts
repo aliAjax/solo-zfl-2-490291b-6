@@ -92,6 +92,8 @@ export interface OpSuccess {
   deduplicated?: boolean;
   promotedIds?: string[];
   message?: string;
+  /** 并发报名中被同一套校验拒绝的请求（序号 + 原因） */
+  rejected?: { index: number; code: string; message: string }[];
 }
 
 export interface OpFailure {

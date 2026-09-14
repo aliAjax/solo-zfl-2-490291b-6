@@ -74,6 +74,7 @@ export default function BatchDetailView({ batchId }: { batchId: string }) {
   const canCancel = ['recruiting', 'locked', 'production'].includes(batch.status);
 
   const unpaidCount = active.filter((s) => signupSettlement(data, s.id).due > 0).length;
+  const unshippedCount = active.filter((s) => !s.shippedAt).length;
 
   return (
     <div className="space-y-5 animate-fadeIn">
@@ -98,7 +99,7 @@ export default function BatchDetailView({ batchId }: { batchId: string }) {
         </div>
         <div className="flex items-center gap-2">
           {recruiting && (
-            <button className="btn-ghost text-xs" onClick={() => openModal('editBatch')}>
+            <button className="btn-ghost text-xs" data-testid="edit-batch" onClick={() => openModal('editBatch')}>
               <Pencil className="h-3.5 w-3.5" /> 编辑批次
             </button>
           )}
@@ -143,12 +144,18 @@ export default function BatchDetailView({ batchId }: { batchId: string }) {
           {step && (
             <button
               data-testid={`transition-${step.target}`}
-              className="btn-primary text-sm"
+              className="btn-primary text-sm disabled:cursor-not-allowed disabled:opacity-50"
               onClick={() => transition(batch.id, step.target)}
+              disabled={
+                (step.target === 'shipping' && unpaidCount > 0) ||
+                (step.target === 'completed' && unshippedCount > 0)
+              }
               title={
                 step.target === 'shipping' && unpaidCount > 0
                   ? `仍有 ${unpaidCount} 笔欠款未结清`
-                  : undefined
+                  : step.target === 'completed' && unshippedCount > 0
+                    ? `仍有 ${unshippedCount} 笔正式订单未发货`
+                    : undefined
               }
             >
               {step.icon}

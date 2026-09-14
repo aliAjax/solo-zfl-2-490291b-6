@@ -1,4 +1,3 @@
-/* eslint-disable no-console */
 // 纯逻辑测试：node 运行（esbuild 打包），不参与 tsc 构建。
 import {
   createBatch,
@@ -12,6 +11,7 @@ import {
   updateAddress,
   markShipped,
   competeForLastSeat,
+  updateBatch,
   batchSummary,
   signupSettlement,
   colorOccupied,
@@ -268,9 +268,8 @@ function mustFail<T extends { ok: boolean }>(r: T, code: string) {
   mustFail(markShipped(debt.state, s2.id, 'SF124', NOW), 'HAS_DEBT');
   // 补回后可发货
   const repay = must(postPayment(debt.state, s2.id, 'balance', 100, 'B3', NOW));
-  must(markShipped(repay.state, s2.id, 'SF124', NOW));
-
-  const done = must(transition(repay.state, batchId, 'completed', NOW));
+  const shipped2 = must(markShipped(repay.state, s2.id, 'SF124', NOW));
+  const done = must(transition(shipped2.state, batchId, 'completed', NOW));
   mustFail(transition(done.state, batchId, 'cancelled', NOW), 'TERMINAL');
   check('状态流不变量', assertInvariants(done.state, 'fsm').length === 0,
     assertInvariants(done.state).join('; '));
@@ -317,6 +316,164 @@ function mustFail<T extends { ok: boolean }>(r: T, code: string) {
   eq('看板 已收=55.5', sum.received, 5550);
   eq('看板 欠款=129.5', sum.debt, 12950);
   eq('看板 退款=0', sum.refunded, 0);
+}
+
+// ---------- 反例 1：减少数量释放名额必须按顺序补位，空位不留 ----------
+{
+  const big = makeBatch({ colors: [{ name: '单色', quota: 5 }] });
+  let s = big.state;
+  const c = big.colorA;
+  // 一 占 3，二/三 各占 1（共 5 满）；候甲、候乙、候丙 各候补 1
+  s = must(signup(s, big.batchId, { participant: '一', colorId: c, qty: 3 }, NOW)).state;
+  for (const n of ['二', '三']) s = must(signup(s, big.batchId, { participant: n, colorId: c, qty: 1 }, NOW)).state;
+  for (const n of ['候甲', '候乙', '候丙']) s = must(signup(s, big.batchId, { participant: n, colorId: c, qty: 1 }, NOW)).state;
+  const idOf = (n: string) => s.signups.find((x) => x.participant === n)!.id;
+  eq('初始占用5', colorOccupied(s, big.batchId, c), 5);
+  eq('初始候补3', waitlistQueue(s, big.batchId).length, 3);
+
+  // 三 数量 1 -> 3（不释放），容量不足应被拒（5-1+3=7>5）
+  mustFail(changeQty(s, idOf('三'), 3, NOW), 'NO_CAPACITY');
+
+  // 一 数量 3 -> 1 释放 2 席 -> 候甲、候乙按序补位，候丙仍候补，空位=0
+  const reduced = must(changeQty(s, idOf('一'), 1, NOW));
+  s = reduced.state;
+  eq('减量后占用仍5（不空位）', colorOccupied(s, big.batchId, c), 5);
+  eq('减量触发2人补位', reduced.promotedIds?.length, 2);
+  check('候甲补位', s.signups.find((x) => x.participant === '候甲')?.occupies === true);
+  check('候乙补位', s.signups.find((x) => x.participant === '候乙')?.occupies === true);
+  check('候丙仍候补', s.signups.find((x) => x.participant === '候丙')?.status === 'waitlisted');
+
+  // 一 取消剩余 1 席 -> 候丙补位，正好满
+  const canceled = must(cancelSignup(s, idOf('一'), NOW));
+  eq('取消最后一席占用仍5', colorOccupied(canceled.state, big.batchId, c), 5);
+  check('候丙补位', canceled.state.signups.find((x) => x.participant === '候丙')?.occupies === true);
+  eq('候补清零', waitlistQueue(canceled.state, big.batchId).length, 0);
+  check('减量补位不变量', assertInvariants(canceled.state, 'qty-fill').length === 0,
+    assertInvariants(canceled.state).join('; '));
+}
+
+// ---------- 反例 2：全部正式订单发货后才能完成 ----------
+{
+  const big = makeBatch({ colors: [{ name: '单色', quota: 5 }] });
+  let s = big.state;
+  const c = big.colorA;
+  for (const n of ['甲', '乙']) {
+    s = must(signup(s, big.batchId, { participant: n, colorId: c, qty: 1 }, NOW)).state;
+  }
+  const ids = s.signups.map((x) => x.id);
+  // 付清两单（105 全额）
+  for (const id of ids) {
+    s = must(postPayment(s, id, 'deposit', 3150, 'D' + id, NOW)).state;
+    s = must(postPayment(s, id, 'balance', 7350, 'B' + id, NOW)).state;
+  }
+  s = must(transition(s, big.batchId, 'locked', NOW)).state;
+  s = must(transition(s, big.batchId, 'production', NOW)).state;
+  s = must(transition(s, big.batchId, 'shipping', NOW)).state;
+  // 未发货不能完成
+  mustFail(transition(s, big.batchId, 'completed', NOW), 'HAS_UNSHIPPED');
+  check('未发货仍可发货（未被锁死）', s.signups.every((x) => !x.shippedAt));
+  // 只发一单仍不能完成
+  s = must(markShipped(s, ids[0], 'TRK1', NOW)).state;
+  mustFail(transition(s, big.batchId, 'completed', NOW), 'HAS_UNSHIPPED');
+  // 全部发货后完成
+  s = must(markShipped(s, ids[1], 'TRK2', NOW)).state;
+  s = must(transition(s, big.batchId, 'completed', NOW)).state;
+  eq('全发货后状态=completed', s.batches[0].status, 'completed');
+}
+
+// ---------- 反例 3：已收款后改阶梯价/运费致净付超应收，必须阻止 ----------
+{
+  const big = makeBatch({ colors: [{ name: '单色', quota: 5 }] });
+  let s = big.state;
+  s = must(signup(s, big.batchId, { participant: '甲', colorId: big.colorA, qty: 1 }, NOW)).state;
+  const id = s.signups[0].id;
+  // 全额付清 105
+  s = must(postPayment(s, id, 'deposit', 3150, 'PD', NOW)).state;
+  s = must(postPayment(s, id, 'balance', 7350, 'PB', NOW)).state;
+  // 把阶梯价降到 50（应收 55），净付 105 > 55 -> 阻止
+  const lower = updateBatch(s, big.batchId, {
+    tiers: [{ upTo: null, priceCents: yuanToCents(50) }],
+  }, NOW);
+  mustFail(lower, 'WOULD_OVERPAY');
+  // 运费降到 0 且单价降到 100（应收 100）仍 < 105 -> 阻止
+  const lowerShip = updateBatch(s, big.batchId, {
+    tiers: [{ upTo: null, priceCents: yuanToCents(100) }],
+    shippingCents: 0,
+  }, NOW);
+  mustFail(lowerShip, 'WOULD_OVERPAY');
+  // 提价到 120（应收 125）净付 105 <= 125 -> 允许
+  const higher = must(updateBatch(s, big.batchId, {
+    tiers: [{ upTo: null, priceCents: yuanToCents(120) }],
+  }, NOW));
+  s = higher.state;
+  eq('提价后应收=125', signupSettlement(s, id).receivable, 12500);
+  check('提价后已收不重复扣减=105', signupSettlement(s, id).received === 10500);
+  // 部分付款场景：净付 31.5，降价到应收 40（单价35+运费5）仍允许
+  let s2 = big.state;
+  s2 = must(signup(s2, big.batchId, { participant: '乙', colorId: big.colorA, qty: 1 }, NOW)).state;
+  s2 = must(postPayment(s2, s2.signups[0].id, 'deposit', 3150, 'PD2', NOW)).state;
+  const okLower = must(updateBatch(s2, big.batchId, {
+    tiers: [{ upTo: null, priceCents: yuanToCents(35) }],
+  }, NOW));
+  eq('净付未超应收可降价，新应收=40', signupSettlement(okLower.state, s2.signups[0].id).receivable, 4000);
+}
+
+// ---------- 反例 4：最后一席并发复用报名状态/输入校验 ----------
+{
+  const big = makeBatch({ colors: [{ name: '单色', quota: 1 }] });
+  const c = big.colorA;
+  const reqs = [
+    { participant: 'p1', colorId: c, qty: 1 },
+    { participant: '', colorId: c, qty: 1 },                 // 非法：空名
+    { participant: 'p2', colorId: 'no-such-color', qty: 1 }, // 非法：坏配色
+    { participant: 'p3', colorId: c, qty: 0 },               // 非法：数量0
+  ];
+  const r = competeForLastSeat(big.state, big.batchId, reqs, NOW);
+  check('含合法请求时整体仍裁决', r.ok === true);
+  eq('唯一赢家 p1', r.winnerId, r.state.signups.find((x) => x.participant === 'p1')?.id);
+  eq('3个非法请求被拒绝', r.rejected?.length, 3);
+  eq('拒绝下标 1/2/3', (r.rejected ?? []).map((x) => x.index).join(','), '1,2,3');
+  eq('占用量=1，非法没落库', colorOccupied(r.state, big.batchId, c), 1);
+  eq('仅2条报名（p1占位 + 无候补因其余全非法）', r.state.signups.length, 1);
+
+  // 锁单后并发：全部拒绝，不新增任何报名
+  let s = big.state;
+  s = must(signup(s, big.batchId, { participant: 'owner', colorId: c, qty: 1 }, NOW)).state;
+  s = must(transition(s, big.batchId, 'locked', NOW)).state;
+  const lockedRace = competeForLastSeat(s, big.batchId, [
+    { participant: 'late1', colorId: c, qty: 1 },
+    { participant: 'late2', colorId: c, qty: 1 },
+  ], NOW);
+  check('锁单后并发整体失败', lockedRace.ok === false);
+  eq('锁单并发错误码 NOT_RECRUITING', (lockedRace as { code: string }).code, 'NOT_RECRUITING');
+  eq('锁单后不新增报名', lockedRace.state.signups.length, 1);
+
+  // 取消后并发
+  let s2 = big.state;
+  s2 = must(transition(s2, big.batchId, 'cancelled', NOW)).state;
+  const cancelRace = competeForLastSeat(s2, big.batchId, [
+    { participant: 'x', colorId: c, qty: 1 },
+  ], NOW);
+  check('取消后并发失败', cancelRace.ok === false);
+  eq('取消并发码 BATCH_CANCELLED', (cancelRace as { code: string }).code, 'BATCH_CANCELLED');
+
+  // 完成后并发（需要先造一个可完成批次）
+  const done = makeBatch({ colors: [{ name: 'd', quota: 5 }] });
+  let s3 = done.state;
+  s3 = must(signup(s3, done.batchId, { participant: 'k', colorId: done.colorA, qty: 1 }, NOW)).state;
+  const kid = s3.signups[0].id;
+  s3 = must(postPayment(s3, kid, 'deposit', 3150, 'KD', NOW)).state;
+  s3 = must(postPayment(s3, kid, 'balance', 7350, 'KB', NOW)).state;
+  s3 = must(transition(s3, done.batchId, 'locked', NOW)).state;
+  s3 = must(transition(s3, done.batchId, 'production', NOW)).state;
+  s3 = must(transition(s3, done.batchId, 'shipping', NOW)).state;
+  s3 = must(markShipped(s3, kid, 'T', NOW)).state;
+  s3 = must(transition(s3, done.batchId, 'completed', NOW)).state;
+  const doneRace = competeForLastSeat(s3, done.batchId, [
+    { participant: 'late', colorId: done.colorA, qty: 1 },
+  ], NOW);
+  check('完成后并发失败', doneRace.ok === false);
+  eq('完成并发码 BATCH_COMPLETED', (doneRace as { code: string }).code, 'BATCH_COMPLETED');
 }
 
 // ---------- 结果 ----------

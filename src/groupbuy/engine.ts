@@ -8,6 +8,7 @@ import type {
   PriceTier,
   TxnKind,
   OpResult,
+  OpSuccess,
 } from './types';
 import { receivableCents, depositDueCents, balanceDueCents } from './money';
 
@@ -208,6 +209,33 @@ export function updateBatch(
     }
   }
 
+  // 已收款保护：修改阶梯价/运费/定金比例后，任何正式订单的净付都不能超过新应收。
+  if (
+    patch.tiers !== undefined ||
+    patch.shippingCents !== undefined ||
+    patch.depositRatioPct !== undefined
+  ) {
+    const hypothetical: GroupBatch = {
+      ...batch,
+      tiers: clone(patch.tiers ?? batch.tiers),
+      shippingCents: patch.shippingCents ?? batch.shippingCents,
+      depositRatioPct: patch.depositRatioPct ?? batch.depositRatioPct,
+      // 招募中尚无锁单快照，定价恒取 tiers
+      lockedTiers: null,
+    };
+    for (const su of state.signups.filter((x) => x.batchId === batchId && x.occupies)) {
+      const netPaid = signupSettlement(state, su).netPaid;
+      const newReceivable = receivableCents(hypothetical, su.qty);
+      if (netPaid > newReceivable) {
+        return fail(
+          state,
+          'WOULD_OVERPAY',
+          `「${su.participant}」已净收 ¥${(netPaid / 100).toFixed(2)}，改价后应收仅 ¥${(newReceivable / 100).toFixed(2)}；会导致净付超过应收，请先退差额或提高对应阶梯价/运费`,
+        );
+      }
+    }
+  }
+
   const s = clone(state);
   const b = s.batches.find((x) => x.id === batchId)!;
   if (patch.name !== undefined) b.name = patch.name.trim();
@@ -229,6 +257,30 @@ interface PlaceInput {
   qty: number;
   contact?: string;
   address?: string;
+}
+
+/**
+ * 报名输入 + 批次状态校验，报名与最后一席并发共用同一套规则：
+ * 仅招募中可新增报名；参与者、数量、配色均需合法。
+ * 返回 null 表示通过，否则返回错误码与中文说明。
+ */
+function validatePlaceInput(
+  batch: GroupBatch,
+  input: PlaceInput,
+): { code: string; message: string } | null {
+  if (batch.status === 'cancelled')
+    return { code: 'BATCH_CANCELLED', message: '批次已取消，无法报名' };
+  if (batch.status === 'completed')
+    return { code: 'BATCH_COMPLETED', message: '批次已完成，无法报名' };
+  if (batch.status !== 'recruiting')
+    return { code: 'NOT_RECRUITING', message: '锁单后不能再新增报名' };
+  if (!input.participant || !input.participant.trim())
+    return { code: 'INVALID', message: '参与者名称不能为空' };
+  if (!Number.isInteger(input.qty) || input.qty <= 0)
+    return { code: 'INVALID', message: '数量必须为正整数' };
+  if (!batch.colors.some((c) => c.id === input.colorId))
+    return { code: 'INVALID_COLOR', message: '配色不存在' };
+  return null;
 }
 
 function placeOne(
@@ -269,14 +321,8 @@ export function signup(
 ): OpResult {
   const batch = getBatch(state, batchId);
   if (!batch) return fail(state, 'NOT_FOUND', '批次不存在');
-  if (batch.status === 'cancelled') return fail(state, 'BATCH_CANCELLED', '批次已取消，无法报名');
-  if (batch.status !== 'recruiting')
-    return fail(state, 'NOT_RECRUITING', '仅招募中可接受新报名');
-  if (!input.participant.trim()) return fail(state, 'INVALID', '参与者名称不能为空');
-  if (!Number.isInteger(input.qty) || input.qty <= 0)
-    return fail(state, 'INVALID', '数量必须为正整数');
-  if (!batch.colors.some((c) => c.id === input.colorId))
-    return fail(state, 'INVALID_COLOR', '配色不存在');
+  const vErr = validatePlaceInput(batch, input);
+  if (vErr) return fail(state, vErr.code, vErr.message);
 
   const s = clone(state);
   const { signup: su, waitlisted } = placeOne(s, batchId, input, now);
@@ -409,8 +455,17 @@ export function changeQty(
 
   const s = clone(state);
   s.signups.find((x) => x.id === signupId)!.qty = newQty;
+  // 减少数量会释放名额：立即按候补顺序补位，空位不留着。
+  let promotedIds: string[] = [];
+  if (newQty < su.qty) promotedIds = fillWaitlist(s, su.batchId);
   void now;
-  return ok(s, { message: `数量已改为 ${newQty}，尾款已按新档位重算` });
+  return ok(s, {
+    promotedIds,
+    message:
+      promotedIds.length > 0
+        ? `数量已改为 ${newQty}，候补按顺序补位 ${promotedIds.length} 人`
+        : `数量已改为 ${newQty}，尾款已按新档位重算`,
+  });
 }
 
 /** 修改联系方式（地址由 updateAddress 单独约束发货） */
@@ -464,6 +519,19 @@ export function transition(
     );
     if (unpaid.length > 0)
       return fail(state, 'HAS_DEBT', `仍有 ${unpaid.length} 笔尾款未结清，不能进入发货`);
+  }
+
+  // 完成：所有正式订单必须已发货，未发货订单不能被永久锁死。
+  if (target === 'completed') {
+    const unshipped = state.signups.filter(
+      (x) => x.batchId === batchId && x.occupies && !x.shippedAt,
+    );
+    if (unshipped.length > 0)
+      return fail(
+        state,
+        'HAS_UNSHIPPED',
+        `仍有 ${unshipped.length} 笔正式订单未发货，全部发货后才能完成`,
+      );
   }
 
   const s = clone(state);
@@ -631,6 +699,10 @@ export function markShipped(
 /**
  * 同一时刻多个请求争抢：在单个同步事务内按序处理，
  * 每次占位都基于事务内最新占用量判定。结果：恰好 1 人占位，其余候补。
+ *
+ * 复用报名阶段的批次状态 + 输入校验（validatePlaceInput / placeOne）：
+ * 锁单、取消、完成后的请求一律拒绝；非法参与者/数量/配色也不会落库。
+ * 非法请求记入 rejected，不影响其余合法请求的裁决。
  */
 export function competeForLastSeat(
   state: GBState,
@@ -639,14 +711,37 @@ export function competeForLastSeat(
   now: string,
 ): OpResult & { winnerId?: string } {
   const batch = getBatch(state, batchId);
-  if (!batch) return fail(state, 'NOT_FOUND', '批次不存在') as OpResult & { winnerId?: string };
+  if (!batch)
+    return fail(state, 'NOT_FOUND', '批次不存在') as OpResult & { winnerId?: string };
+
   const s = clone(state);
+  const rejected: NonNullable<OpSuccess['rejected']> = [];
   let winnerId: string | undefined;
-  for (const req of requests) {
+  requests.forEach((req, index) => {
+    const vErr = validatePlaceInput(getBatch(s, batchId)!, req);
+    if (vErr) {
+      rejected.push({ index, ...vErr });
+      return;
+    }
     const { signup: su, waitlisted } = placeOne(s, batchId, req, now);
     if (!waitlisted && winnerId === undefined) winnerId = su.id;
+  });
+  const allRejected = rejected.length === requests.length && requests.length > 0;
+  if (allRejected) {
+    return {
+      ...fail(state, rejected[0].code, rejected[0].message),
+      rejected,
+    } as OpResult & { winnerId?: string };
   }
-  return { ...ok(s), winnerId } as OpResult & { winnerId?: string };
+  return {
+    ...ok(s, {
+      rejected: rejected.length ? rejected : undefined,
+      message: rejected.length
+        ? `${rejected.length} 个请求因状态/输入非法被拒绝，其余已裁决`
+        : undefined,
+    }),
+    winnerId,
+  } as OpResult & { winnerId?: string };
 }
 
 // ---------- 批次看板汇总 ----------
