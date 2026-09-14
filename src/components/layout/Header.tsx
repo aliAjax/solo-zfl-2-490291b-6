@@ -1,4 +1,5 @@
-import { Keyboard, Plus, GitCompare, List, BarChart3, HardDrive } from 'lucide-react';
+import { Keyboard, Plus, GitCompare, List, BarChart3, HardDrive, Boxes } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { useAppStore } from '@/store/useAppStore';
 
 export default function Header() {
@@ -77,6 +78,14 @@ export default function Header() {
               <span className="hidden sm:inline">统计</span>
             </button>
           </div>
+
+          <Link
+            to="/groupbuy"
+            className="p-2 rounded-lg text-ink-400 hover:text-brass-200 hover:bg-brass-300/10 transition-colors"
+            title="键帽团购与分期结算台"
+          >
+            <Boxes className="h-4 w-4" />
+          </Link>
 
           <button
             onClick={openImportExport}

@@ -1,4 +1,27 @@
-# React + TypeScript + Vite
+# KeyFeeling
+
+键盘手感记录与对比工具（React + TypeScript + Vite），另含**键帽团购与分期结算台**（`/groupbuy`，首页顶栏 Boxes 图标进入）。纯前端、localStorage 持久化（键 `keyfeeling-groupbuy-v1`）。
+
+业务规则：
+
+- **批次录入**：配色名额、阶梯单价、定金比例、尾款截止日、每单运费。
+- **报名占位**：按配色占位，超额自动进候补；名额释放按候补 FIFO 顺序补位，最后一席不会被重复占用。
+- **跨档调价**：锁单前改数量命中新阶梯，只调整**未结算尾款**，已收流水不重复扣减。
+- **账务**：款项按交易号幂等入账（重复交易号忽略）；退款不能超过已收；存在欠款不能发货。
+- **状态机**：招募 → 锁单 → 生产 → 发货 → 完成（逐级，不能越级），另可取消；锁单后不能改配色，发货后不能改地址，取消时账务与名额一致。
+- **看板**：名额占用、应收、已收、欠款、退款。金额一律以「分」整数存储。
+
+```bash
+npm run dev          # 开发
+npm run build        # 类型检查 + 生产构建
+npm run check        # 仅类型检查
+npm run test:gb      # 纯逻辑测试（跨档/补位/幂等/超额退款/越级/取消一致性）
+node scripts/e2e.mjs # 浏览器 E2E（先 build，再 vite preview --port 5200）
+```
+
+---
+
+## Vite 模板说明
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
