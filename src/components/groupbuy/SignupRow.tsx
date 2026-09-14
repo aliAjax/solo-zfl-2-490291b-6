@@ -79,28 +79,33 @@ export default function SignupRow({ su, batch }: { su: Signup; batch: GroupBatch
           )}
         </div>
 
-        {!cancelled && (
-          <div className="flex items-center gap-1.5">
-            {!waitlisted && (
-              <>
-                <IconBtn testid={`pay-${su.id}`} title="入账（定金/尾款）" onClick={() => openModal('payment', su.id)} disabled={batch.status === 'cancelled'}>
-                  <Wallet className="h-3.5 w-3.5" />
-                </IconBtn>
-                <IconBtn testid={`refund-${su.id}`} title="退款" onClick={() => openModal('refund', su.id)} disabled={refundable <= 0}>
-                  <Undo2 className="h-3.5 w-3.5" />
-                </IconBtn>
-                {shippingPhase && !su.shippedAt && (
-                  <IconBtn testid={`ship-${su.id}`} title="发货" tone="good" onClick={() => setShowShip((v) => !v)} disabled={set.due > 0}>
-                    <Truck className="h-3.5 w-3.5" />
+        <div className="flex items-center gap-1.5">
+          {!cancelled && (
+            <>
+              {!waitlisted && (
+                <>
+                  <IconBtn testid={`pay-${su.id}`} title="入账（定金/尾款）" onClick={() => openModal('payment', su.id)} disabled={batch.status === 'cancelled'}>
+                    <Wallet className="h-3.5 w-3.5" />
                   </IconBtn>
-                )}
-              </>
-            )}
-            <IconBtn testid={`cancel-${su.id}`} title="取消报名（释放名额触发候补补位）" tone="bad" onClick={() => cancelSignup(su.id)}>
-              <XCircle className="h-3.5 w-3.5" />
+                  {shippingPhase && !su.shippedAt && (
+                    <IconBtn testid={`ship-${su.id}`} title="发货" tone="good" onClick={() => setShowShip((v) => !v)} disabled={set.due > 0}>
+                      <Truck className="h-3.5 w-3.5" />
+                    </IconBtn>
+                  )}
+                </>
+              )}
+              <IconBtn testid={`cancel-${su.id}`} title="取消报名（释放名额触发候补补位）" tone="bad" onClick={() => cancelSignup(su.id)}>
+                <XCircle className="h-3.5 w-3.5" />
+              </IconBtn>
+            </>
+          )}
+          {/* 已取消订单仍持有净付时，允许继续退款，不锁死 */}
+          {refundable > 0 && (
+            <IconBtn testid={`refund-${su.id}`} title="退款" onClick={() => openModal('refund', su.id)}>
+              <Undo2 className="h-3.5 w-3.5" />
             </IconBtn>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {/* 发货条 */}

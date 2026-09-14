@@ -209,7 +209,9 @@ export function updateBatch(
     }
   }
 
-  // 已收款保护：修改阶梯价/运费/定金比例后，任何正式订单的净付都不能超过新应收。
+  // 已收款保护：修改阶梯价/运费/定金比例后，任何「持有净付」的订单（含已取消订单）
+  // 净付都不能高于新应收。差额已被退款覆盖（净付回落到新应收以内）才放行，
+  // 否则阻止并说明至少还要退多少。
   if (
     patch.tiers !== undefined ||
     patch.shippingCents !== undefined ||
@@ -223,14 +225,17 @@ export function updateBatch(
       // 招募中尚无锁单快照，定价恒取 tiers
       lockedTiers: null,
     };
-    for (const su of state.signups.filter((x) => x.batchId === batchId && x.occupies)) {
+    for (const su of state.signups.filter((x) => x.batchId === batchId)) {
       const netPaid = signupSettlement(state, su).netPaid;
+      if (netPaid <= 0) continue; // 未收款 / 已全额退款的订单不构成约束
       const newReceivable = receivableCents(hypothetical, su.qty);
-      if (netPaid > newReceivable) {
+      const needRefund = netPaid - newReceivable;
+      if (needRefund > 0) {
+        const cancelledTag = su.status === 'cancelled' ? '（该订单已取消，但仍有未退款）' : '';
         return fail(
           state,
           'WOULD_OVERPAY',
-          `「${su.participant}」已净收 ¥${(netPaid / 100).toFixed(2)}，改价后应收仅 ¥${(newReceivable / 100).toFixed(2)}；会导致净付超过应收，请先退差额或提高对应阶梯价/运费`,
+          `「${su.participant}」净付 ¥${(netPaid / 100).toFixed(2)}${cancelledTag}，改价后应收仅 ¥${(newReceivable / 100).toFixed(2)}；净付会高于应收，请先退款 ¥${(needRefund / 100).toFixed(2)} 差额（或提高对应阶梯价/运费）`,
         );
       }
     }

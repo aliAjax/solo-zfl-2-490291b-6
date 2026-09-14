@@ -79,6 +79,14 @@ function must<T extends { ok: boolean }>(r: T): Extract<T, { ok: true }> {
 function mustFail<T extends { ok: boolean }>(r: T, code: string) {
   check(`拒绝 ${code}`, !r.ok && (r as { code?: string }).code === code, JSON.stringify(r));
 }
+function mustFailContaining<T extends { ok: boolean }>(r: T, code: string, text: string) {
+  const f = r as { code?: string; message?: string };
+  check(
+    `拒绝 ${code} 且提示「${text}」`,
+    !r.ok && f.code === code && (f.message ?? '').includes(text),
+    JSON.stringify({ code: f.code, message: f.message }),
+  );
+}
 
 // ---------- 场景 1：跨档只调未结算尾款，已收不重复扣减 ----------
 {
@@ -416,6 +424,46 @@ function mustFail<T extends { ok: boolean }>(r: T, code: string) {
     tiers: [{ upTo: null, priceCents: yuanToCents(35) }],
   }, NOW));
   eq('净付未超应收可降价，新应收=40', signupSettlement(okLower.state, s2.signups[0].id).receivable, 4000);
+}
+
+// ---------- 反例 3b：已收款订单即使取消，改价/运费仍按净付 vs 新应收校验 ----------
+{
+  const big = makeBatch({ colors: [{ name: '单色', quota: 5 }] });
+  const lowTiers = [{ upTo: null, priceCents: yuanToCents(50) }]; // 应收 55
+  let s = big.state;
+  s = must(signup(s, big.batchId, { participant: '甲', colorId: big.colorA, qty: 1 }, NOW)).state;
+  const id = s.signups[0].id;
+  s = must(postPayment(s, id, 'deposit', 3150, 'PD', NOW)).state;
+  s = must(postPayment(s, id, 'balance', 7350, 'PB', NOW)).state; // 净付 105
+
+  // 取消该订单（占位释放），净付仍 105
+  s = must(cancelSignup(s, id, NOW)).state;
+  check('取消后不占位', s.signups[0].occupies === false);
+
+  // 改价降到应收 55：净付 105 > 55，必须阻止，并说明需先退 50
+  mustFailContaining(updateBatch(s, big.batchId, { tiers: lowTiers }, NOW), 'WOULD_OVERPAY', '请先退款 ¥50.00');
+  // 降运费到 0 且单价 100 -> 应收 100，净付 105 > 100，阻止并说明需退 5
+  mustFailContaining(
+    updateBatch(s, big.batchId, { tiers: [{ upTo: null, priceCents: yuanToCents(100) }], shippingCents: 0 }, NOW),
+    'WOULD_OVERPAY',
+    '请先退款 ¥5.00',
+  );
+
+  // 只退 30（部分退款），净付 75 > 55 仍阻止，需再退 20
+  let s2 = must(postRefund(s, id, 3000, 'R1', NOW)).state;
+  mustFailContaining(updateBatch(s2, big.batchId, { tiers: lowTiers }, NOW), 'WOULD_OVERPAY', '请先退款 ¥20.00');
+
+  // 退足差额 50（净付 55 == 新应收 55），放行
+  s2 = must(postRefund(s, id, 5000, 'R2', NOW)).state;
+  const allowed = must(updateBatch(s2, big.batchId, { tiers: lowTiers }, NOW));
+  eq('差额退足后改价放行', allowed.state.batches[0].tiers[0].priceCents, yuanToCents(50));
+  eq('放行后该取消订单应收=55', signupSettlement(allowed.state, id).receivable, 5500);
+  eq('放行后净付=55 不再高于应收', signupSettlement(allowed.state, id).netPaid, 5500);
+
+  // 全额退款后（净付 0）改价完全不受约束
+  const s3 = must(postRefund(s, id, 10500, 'R3', NOW)).state;
+  const free = must(updateBatch(s3, big.batchId, { tiers: [{ upTo: null, priceCents: 100 }], shippingCents: 0 }, NOW));
+  eq('全额退款后可任意改价', free.state.batches[0].shippingCents, 0);
 }
 
 // ---------- 反例 4：最后一席并发复用报名状态/输入校验 ----------

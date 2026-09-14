@@ -122,7 +122,7 @@ async function editBatchPrice(t0, ship) {
   await sleep(350);
 }
 await editBatchPrice('50'); // 应收降到55 < 净付105
-ok('降价致净付超应收被拦截（toast）', (await page.locator('text=净付超过应收').count()) >= 1);
+ok('降价致净付超应收被拦截（toast）', (await page.locator('text=/净付.*高于应收|净付超过应收/').count()) >= 1);
 // 失败保留弹窗，关闭
 await page.locator('.modal-surface button:has-text("取消")').first().click();
 await sleep(150);
@@ -136,7 +136,7 @@ await page.fill('[data-testid="batch-tier-price-0"]', '100');
 await page.locator('.modal-surface input[type="number"][step="0.01"]').nth(2).fill('0');
 await $('[data-testid="batch-submit"]').click();
 await sleep(350);
-ok('降运费致超额同样拦截', (await page.locator('text=净付超过应收').count()) >= 1);
+ok('降运费致超额同样拦截', (await page.locator('text=/净付.*高于应收|净付超过应收|请先退款/').count()) >= 1);
 await page.locator('.modal-surface button:has-text("取消")').first().click();
 await sleep(150);
 
